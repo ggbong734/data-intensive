@@ -310,6 +310,203 @@ Pulling just a few columns from row-oriented storage required loading of all the
 
 ### Chapter 4 - Encoding and Evolution
 
+This chapter covers ways of turning data structures into bytes on network or bytes on disk. 
+
+Code changes on server-side applications is performed through a rolling upgrade (staged rollout) where the new  version is deployed to a few nodes at a time. For client-side applications, the user has to install the update. 
+
+**Backward compatibility**
+> Newer code can read old data
+
+**Forward compatibility**
+> Older code can read new data
+
+Data is represented in memoty for efficient access by CPU (using pointers). When data is sent to another system, it is encoded as a self-contained sequence of bytes (e.g. JSON documen)
+
+**Encoding/serialization**
+> The translation of data from in-memory representation to a byte sequence (e.g. JSON file).
+
+**Parsing/deserialization**
+> Process of converting a byte sequence data into an in-memory representation.
+
+Problems with encoding and decoding data:
+- Encoding is tied to a particular language. Reading data from another language is difficult.
+- Languages have built-in support for encoding. Java has `java.io.Serializable`, Python has `pickle`.
+- Data versioning and efficiency (CPU time) are often an afterthought. 
+- Security issue during decoding as arbitrary classes need to be instantiated.
+
+It's a bad idea to use a programming language built-in decoding. JSON and CSV are alternatives.
+
+Problems with common data encoding formats:
+- Hard to distinguish between string and numbers in XML and CSV. JSON doesn't distinguish integers and floats.
+- JSON and XML don't support Unicode character strings. 
+- Not many people create JSON and XML schemas
+- CSV does not have any schema. It's very vague. May see issues if value contains comma or newline character.
+
+**Binary encoding**
+- For internal data transfer within an organization, binary formats of JSON may be suitable.
+- More compact and faster to parse compared to JSON, CSV.
+- Examples include MessagePack, BSON.
+
+**Thrift and Protocol Buffers** are binary encoding libraries based on the same principle. 
+- a tag number is assigned to each field instead of using the full field name in the encoding.
+- When a field name is changed, we keep the field tag (id) and just changed the schema definition.
+- To maintain forward compatibility, new field can be ignored by old code. 
+- For backward compatibility, every field added after initial deployment of the schema must be optional or have a default value.
+- Be careful if data type is changed say from int32 to int64, the old code may truncate new data as it doesn't fit the int 32. 
+
+
+#### Avro
+
+Another binary encoding format as a subproduct of Hadoop.
+- Uses a schema to specify the structure of the data being encoded. Two schema languages provided.
+- no tag numbers for each field, does not include datatype in the encoding
+- more compact encoding compared to Thrift or ProtocolBuffers
+- parsing the binary data involves going through each field in order they appear in the schema. Schema tells us the datatype.
+- requires exact same schema used for writing the data when reading
+
+Writer's schema (produced when writing file) and reader's schema (produced when decoding) don't have to be the same in Avro. they just have to be compatible. Avro will compare the two schemas side by side and resolve the difference. E.g. different order will be matched up by field name, new data will be ignored.
+
+
+With Avro, forward compatibility means new schema = writer while older version of the schema = reader. Conversely, backward compatibility means new version of the schema as reader while old version is the writer. **User may only add or remove a field with a default value.**
+
+Changing a field name is backward compatible (new code can read old data) but not forward compatible (old code can't read new field). Adding a branch to a union type is the same. 
+
+**Schema versions**
+- for a large file, the writer's schema can be included at the beginning of the file.
+- for a database, the version number of the record can be included and when extracting data, the schema with that version number is referenced.
+- for sending data over a network, the two processes need to negotiate the schema version.
+- be sure to create a database of schema versions to keep track of schema compatibility.
+
+**Dynamically generated schemas*
+- Avro is better than Thrift or ProtocolBuffers for converting data into binary format when schema changes occur frequently.
+- In Avro, a new schema can just be generated.
+- In Thrift or ProtocolBuffer, a database administrator has to manually assign new field tags to changed fields
+
+#### Dataflow through Databases
+
+If a new field is added to a schema using newer code, and an older code reads the record, and updates it, and writes, it back. the ideal behavior is for the old code to keep the new field intact.
+
+Unknown fields may be lost if a database value is decoded into model objects and later reencoded back into the database. 
+
+When adding a new column to a database, may want to use `null` default value, such that the database fills in `null` in the new fields when reading old data.
+
+When creating a backup copy of the database for archival, the dump is typically encoded using the latest schema. Avro object container files are a good format. Parquet column-oriented format is another good approach.
+
+#### Dataflow through Services: REST and RPC
+
+The server creates an API over the network and clients can connect to servers to make requests to the API. API exposed by the server is known as a service. 
+
+An application where a server acts as a client to request data and act as a client to another server is called service-oriented architecture. 
+
+Services are similar to databases that they allow clients to submit and query data. But the API that the service expose is specific that it only allows a set of predetermined inputs and outputs. Thus services and API can impose restrictions on what clients can and cannot do.
+
+It is good to have each service be run by a separate team such that they can be update independently. Old and new versions of servers and clients can be expected to run at the same time so the data encoding used by servers and clients must be compatible across versions.
+
+
+When the protocol for talking to a service uses HTTP, it is called a web service. But not only limited to the web. For e.g. mobile device app requesting to a service via HTTP over public internet. One service making requests to another service owned by the same organization. One service making requests to a service owned by a different organization. 
+
+
+There are two approaches to **web services**.
+
+**REST**
+- not a protocol but a design philosophy
+- emphasizes simple data formats
+- uses URL for identifying resources
+- uses HTTP features for cache control, authentication, content type negotiation. 
+- getting more popular than SOAP.
+- an API designed according to REST principles is called RESTful.
+
+**SOAP**
+- XML-based protocol for making network API requests
+- aims to be independent from HTTP and avoids using most HTTP features. 
+- APIS is described using Web Services Description Language (WDSL)
+- SOAP messages are complex to construct and users have to rely on IDES and tool support. 
+- integrating SOAP with languages not supported by SOAP vendors is difficult.
+
+**Remote procedure call (RPC)**
+- RPC has many issues and is fundamentally flawed.
+- a network request is unpredictable, network problems are common.
+- network request can result in a timeout, which makes it hard to diagnose what went wrong.
+- a network request is slower than a function call, and its latency is highly variable
+- client and service may be implemented in different programming language so RPC framework must translate.
+- mainly ONLY used by services owned by the same organization.
+
+RESTful APIs are the predominant style for public APIS because requests can be made simply with `curl` or web browser, no need for extra software, and is supported by mainstream programming languages and platform.
+
+We can assume that servers will be updated first and then clients. Thus we only need backward compatibility on requests, and forward compatibility on responses. 
+
+#### Message-Passing Dataflow
+
+Asynchronous message-passing systems are between RPC and databases, a client's request is sent to another process just like RPC, but the message is not sent via direct network connection but goes to an intermediary message queue. 
+
+Advantages of message-passing system:
+- message queue act as buffer if recipient is not available
+- avoids the sender needing to know the IP address and port number of recipient 
+- allows one message to be sent to multiple recipients 
+- decouples the sender from recipient (sender just publishes messages and doesn't care who consumes them)
+
+Asynchronous means the sender doesn't wait for message to be delivered, it simply sends and forget about it)
+
+**message broker/queue**
+- Example is Apache Kafka
+- used by a process sending a message to a queue/topic then the broker ensures delivery to one or more consumers/subscribers.
+- a queue or topic provides only a one-way dataflow
+- a consumer/subscriber can publish message to another topic (chaining)
+- don't enforce a data model.
+
+**actor model**
+- programming model for concurrency in a single process. 
+- encapsulates logic
+- One actor represents one client/entity. Not shared with another actor.
+
+
+## Part II: Distributed Data
+
+In this part we ask what happens if multiple machines are involved in storage and retrieval of data. 
+
+**Scalability**
+> Ability to spread load across multiple machines when data volume/read load/write load grows too big for one machine
+
+**Fault tolerance/high availability**
+> If one machine goes down, multiple machines are present to give redundancy
+
+**Latency**
+> With users globally distributed, have servers at various locations to be close to users. 
+
+
+**shared memory architecture**
+> machines share CPU, RAMS, and disks. Also called scaling up (vertical scaling). 
+
+**shared disk architecture**
+> machines have independent CPUs and RAMS but store data on shared disks
+
+**shared nothing architecture**
+> Each node uses its own CPU, RAM, and disks. Also called scaling out (horizontal scaling).
+
+Scaling out can distribute data across geographic regions, and reduce latency. Cloud deployments make this simpler. 
+
+This book focuses on shared nothing architecture. Which has many complexities. 
+
+### Chapter 5 - Replication
+
+**Replication**
+> Keeping a copy of the same data on several different nodes to provide redundancy.
+
+**Partitioning**
+> Splitting a big database into smaller subsets so that different partitions can be assigned to different nodes (a.k.a sharding). 
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
