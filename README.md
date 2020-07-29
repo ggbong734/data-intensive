@@ -495,13 +495,102 @@ This book focuses on shared nothing architecture. Which has many complexities.
 **Partitioning**
 > Splitting a big database into smaller subsets so that different partitions can be assigned to different nodes (a.k.a sharding). 
 
+Three popular algorithm for replicating: single-leader, multi-leader, and leaderless application. 
 
+The main tradeoffs to use synchronous or asynchronous (don't wait for process to complete), how to handle failed replicas. 
 
+**leader-based replication (master-slave application)**
+- One of the replica is designated as the leader/master/primary.
+- Other replicas are followers/slaves/secondaries
+- When writing, requests are sent to leaders who then send the replication log to followers.
+- when a client wants to read data, it can query either leader or any of the followers.
 
+**synchronous replication**
+> the leader waits until the follower has confirmed it received the write before reporting success to the user
+- follower is *guaranteed* to have the latest data like the leader
+- but if the follower crashes or encounters faults, the write cannot be processed
+- impractical to have many followers be synchronous
 
+**asynchronous replication**
+> leader sends the replication log to follower but doesn't wait for a response from follower.
+- this ensures rapid writes but may also result in write failures even as the system reports a success
+- One common used approach is semi-synchronous where 1+ node serves as synchronous follower.
+- chain replication is another technique used to avoid losing data if the leader fails.
 
+To copy data to a new follower, the follower copies from a snapshot of the leader database, then copies the data changes that appear in the leader's log since the snapshot was created to be in sync with the leader. 
 
+#### Handling node outages
 
+Maintaining replica consistency, durability, availability, latency are key problems in distributed systems.
+To maintain high availability, our goal is to keep the whole system running even if nodes fail.
+
+**Follower failure**
+- The follower that crashes can refer to its log to check the last transaction that occurred before the fault.
+- It then checks with the leader on the remaining transactions that occurred after the checkpoint
+
+**Leader failure**
+- One of the followers needs to be promoted to be the new leader
+- Clients need to be configured to send writes to the new leader
+- Other followers need to start consuming data changes from the new leader. 
+- The process is called *failover*.
+- If asynchronous replication, new leader may not be up to date with old leader. The unreplicated writes are discarded.
+- Two nodes may both believe that they are the new leader.
+
+#### Replication logs
+
+How does leader-based replication work under the hood?
+
+**statement based replication**
+- leader logs every write request (statement) and sends the log to its follower
+- problem may arise if nondeterministic function like `NOW()` and `RAND()` are used which produce different results in each replica.
+- considered unsafe, not as popular right now
+
+**write-ahead log (WAL) shipping**
+- In the case of B-tree storage enginer, modifications are written to a write-ahead log so the index can be restored after a crash.
+- the log is an append-only sequence of bytes containing all writes to the database.
+- the disadvantage is that the log is written in very low level: which bytes were changed in disk blocks. Changes to storage format will require a change to the log. The leader and followers have to have the same database software version.
+- followers use to this log to catch up with the leader. 
+
+**logical log replication**
+- different format for replication log (logical log) and for the storage engine. 
+- the log has the granularity of a row. 
+- for insert row, the log contains new values of all columns.
+- for deleted row, the log contains the primary key of deleted rows 
+- the logical log is decoupled from the storage engine internals, can be kept backward compatible, allowing leader and followers to run different versions of the software
+
+#### Trigger based replication
+
+**trigger** 
+> lets you register custom application code that is automatically executed when a data change occurs in a database.
+- has greater flexibility than database's built in replication
+- but has greater overheads and is more prone to bugs and limitations than database's built in system.
+
+#### Problems with Replication lag
+
+Most web application require more reads than writes. To serve this, many followers can be created after the leader. For this type of read-scaling architecture, only asynchronous replication makes sense. But this creates an issue where the leader and follower may not have the same data due to **replication lag**.
+
+**replication lag**
+> difference between leader and follower in asynchronous replication due to writes not yet reflected in followers.
+- lag may increase to several seconds or minutes in some cases.
+
+Some techniques to resolve replication lag:
+- when reading something the user may have modified, read it from the leader, otherwise read from follower.
+- could also monitor replication lag on followers and prevent queries on follower that is more than x seconds behind the leader
+- the system can be programmed to ensure replica serving any reads for that user reflects updates until that timestamp. 
+
+When handling read writes requests from multiple devices, e.g. changing profile info on desktop and viewing on mobile phone, approches that uses timestamp of the last user's update become more difficult. The metadata will need to be centralized so that one device knows the updates that happened on the other device. Also, if replicas are in distributed across multiple regions, we may need to rout requests from all of user's devices to the same datacenter. 
+
+**monotonic read**
+ > guarantee that users who requests multiple reads in sequence, they don't see time moving backwards, especially for asynchronous followers.
+- one way is to ensure each user always read from the same replica. 
+
+**consistent prefix read**
+> guarantees that if a sequence of writes occur in a certain order, anyone reading the writes will see them appear in the same order. 
+- usually a problem in partitioned databases, different partitions operate independently, so no global ordering of writes. 
+
+Always worth thinking about how the application may behave if the replication lag increases to several minutes or hours...
+
+#### Multi-leader replication
 
 
 
