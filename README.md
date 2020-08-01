@@ -592,6 +592,89 @@ Always worth thinking about how the application may behave if the replication la
 
 #### Multi-leader replication
 
+We can have a leader in each datacenter, within each datacenter regular leader follower replication is used, between datacenters, each leader recplicates its changes to leaders in other datacenters. This provides improvement to performance (asynchronous replication is possible), tolerance of datacenter outages, tolerance to network problems.
+
+One big downside is when the same data is being modified in two datacenters. Conflict resolution must be used. 
+
+An example is the calendar app on phone. Multiple devices need to sync and each device acts as a datacenter. Real-time collaborative editing (google sheets) also utilize multi-leader approach but requires good conflict resolution.
+
+#### Write conflicts
+
+**Conflict**
+> Two writes concurrently modify the same field in the same record, setting it to two different values. Another kind is when a booking app makes two reservation on the same room/seat at the same time. Conflict may arise if they are written on different leaders.
+
+Simplest way is to avoid conflicts. This can be done by assigning each user/record into one datacenter for writing. Any changes or writes to the user will be routed to the same datacenter and use the leader in the datacenter for reading and writing. 
+
+In multi-leader configuration, there's no defined ordering of writes, it's not clear what the final value should be. 
+- One way is to give each write a unique ID (e.g. timestamp, incrementing number) and pick writes with highest value. But this approach implies data loss.
+- Another way is to record all changes and let user resolve conflict. 
+
+#### Multi-leader replication topologies
+
+**replication topology**
+> describes the communication paths along which writes are propagated from one node to another. 
+
+Examples include circular topology, star topology, all to all topology.
+- All-to-all: every leader sends writes to every other leader
+- Circular: each node receives writes from on node and forwards those writes (plus its own writes) to on other node
+- Star: One designated root node forwards writes to all other nodes. Similar to a tree
+
+Fault tolerance of a more densely connected topology (like all-to-all) is better because it avoids a single point of failure. 
+
+Another type of conflict is when a leader overtakes another leader in terms of writes due to network issues in the slow leader.  When using multi-leader replication, it is worth being aware of these issues.
+
+#### Leaderless replication
+
+No designated leader in this scheme so writes are concurrently sent to multiple replicas without order. If some replicas fail to write say for a system update, the write is allowed to fail at the replica. However, when reading, read requests are sent to several nodes in parallel. Version numbers are used to determine which value is newer. 
+
+Repair on *stale* replica can be done during reads (read repair). If system detects one replica has old value, it can replace the value with the new one from newer replica. There could also be a background process (anti-entropy process) which continuously checks for differences between replica. Note that without anti-entropy process, data that are rarely read may be missing as values are only repaired during reads.
+
+#### Quorums for reading and writing
+
+For leaderless replication, if there are n replicas, every write must be confirmed by w nodes and we must query at least r node for each read. Leaderless replication is designed to tolerate conflicting concurrent writes, network interruptions, and latency spikes. 
+
+As long as w + r > n, we expect to get an up-to-date value when reading because at least one of the r nodes we're reading from must be up to date. 
+
+Reads and writes that obey these r and w values are called quorum reads and writes.
+
+If fewer than the required w or r nodes are available, writes or reads return an error. 
+
+In some cases, using a smaller w and r may be desirable because even though we are more likely to read stale values, as there is a chance that our read didn't include node with the latest value, this configuration allows lower latency and higher availability.
+
+**Sloppy quorum**
+> In the case of node failures, writes are written to nodes that are among the designated n "home" nodes for a value. By analogy, if we lock ourselves out of our house, we seek refuge at a neighbor's place. Once the home node recovers, 
+- Sloppy quorum is useful for increasing write availability. We can write as long as w nodes are available, but the this means even if w + r > n, we cannot be sure that the latest value for a key is read. As the latest value may be outside the n "home" nodes.
+
+#### Monitoring stateness
+
+It's important to monitor whether database is returning up-to-date results. We need to be aware of the health of the application.
+For leader-based replication, the database typically keeps track of the replication lag (by subtracting leader's position from follower's position, we can measure replication lag).
+
+In systems with leaderless replication, there is no fixed in which writes are applied, which makes monitoring more difficult. Moreover, if the database only uses read repair (no anti-entropy), there is no limit to how old a value might be. 
+
+#### Dealing with concurrent writes
+
+**Last write wins**
+> declare that each replica need only to store the most "recent value" and allow "older" values to be overwritten and discarded. Requires an unambiguous wasy to determine which write is more recent. If losing data is not acceptable, Last write winds is a poor choice for conflict resolution. 
+
+When we have two operations A and B, there are three possibilities: either A happened before B, or B happened before A, or A and B are concurrent. What we need is an algorithm to tell us whether two operations are concurrent or not. 
+
+**For defining concurrency, exact time doesn’t matter: we simply call two operations concurrent if they are both unaware of each other, regardless of the physical time at which they occurred.**
+
+Algorithm for dealing with concurrent writes using version number (for a single replica) is provided in the text on page 266.
+
+### Chapter 6 Partitioning
+
+
+
+
+
+
+
+
+
+
+
 
 
 
