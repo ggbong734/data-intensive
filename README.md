@@ -665,20 +665,134 @@ Algorithm for dealing with concurrent writes using version number (for a single 
 
 ### Chapter 6 Partitioning
 
+Partitions are defined such that each piece of data belongs to exactly one partition. The main reaason for partitioning data is scalability. Partitions can be placed on different nodes across many disks. 
 
+Usually combined with replication such that each record (belonging to exactly one partition) is stored on several different nodes for fault tolerance. 
 
+Our goal with partitioning is to spread the data and the query load evenly across nodes.
+If the partitioning is unfair, so that some partitions have more data or queries than others, we call it skewed. The presence of skew makes partitioning much less effective. In an extreme case, all the load could end up on one partition,
 
+**hot spot**
+> A partition with disproportionately high load.
 
+#### Partitioning by Key range
 
+One way of partitioning is to assign a continuous range of keys. The ranges of keys are not necessarily evenly spaced, because your data may not be evenly distributed.
 
+However, the downside of key range partitioning is that certain access patterns can lead to hot spots. If the key is a timestamp, then the partitions correspond to ranges of time — e.g., one partition per day. Unfortunately, because we write data from the sensors to the database as the measurements happen, all the writes end up going to the same partition. To avoid this problem in the sensor database, you need to use something other than the timestamp as the first element of the key. For example, you could prefix each timestamp with the sensor name so that the partitioning is first by sensor name and then by time.
 
+#### Partitioning by Hash of Key
 
+Once you have a suitable hash function for keys, you can assign each partition a range of hashes (rather than a range of keys), and every key whose hash falls within a partition’s range will be stored in that partition.This technique is good at distributing keys fairly among the partitions. The partition boundaries can be evenly spaced, or they can be chosen pseudorandomly.
 
+Unfortunately however, by using the hash of the key for partitioning we lose a nice property of key-range partitioning: the ability to do efficient range queries. Keys that were once adjacent are now scattered across all the partitions, so their sort order is lost. Any range query has to be sent to all partitions.
 
+For keys that are very hot (e.g. a Twitter account of a megastar), there will be a lot of read and write requests. One way to address this is to add a random number to the beginning and end of the key, essentially making 100 variations of this key. Now we can split the writes to the key evenly distributed across 100 different keys. But any read will have to do more work as it has to read all 100 keys from different partitions and combine the data.  
 
+#### Partitioning and Secondary Indexes
 
+The situation becomes more complicated if secondary indexes are involved (see also “Other Indexing Structures”). A secondary index usually doesn’t identify a record uniquely but rather is a way of searching for occurrences of a particular value.
 
+**partitioning secondary indexes by document**
+> In this indexing approach, each partition is completely separate: each partition maintains its own secondary indexes, covering only the documents in that partition.
+- However, reading from a document-partitioned index requires care. If you want to search for e.g. all red cars, you need to send the query to all partitions. Thus it can make read queries on secondary indexes expensive. 
 
+**partitioning secondary indexes by term**
+> Rather than each partition having its own secondary index (a local index), we can construct a global index that covers data in all partitions. A global index must also be partitioned, but it can be partitioned differently from the primary key index.
+
+The advantage of a global (term-partitioned) index over a document-partitioned index is that it can make reads more efficient: rather than doing scatter/ gather over all partitions, a client only needs to make a request to the partition containing the term that it wants. However, the downside of a global index is that writes are slower because a write to a single document may now affect multiple partitions of the index. (every term in the document might be on a different partition)
+
+#### Rebalancing Partitions
+
+The process of moving load from one node in the cluster to another is called rebalancing.
+- After rebalancing, the load (data storage, read and write requests) should be shared fairly between the nodes in the cluster
+- While rebalancing is happening, the database should continue accepting reads and writes.
+- No more data than necessary should be moved between nodes, to make rebalancing fast and to minimize the network and disk I/ O load.
+
+**fixed number of partitions**
+- create many more partitions than there are nodes, and assign several partitions to each node.
+- Only entire partitions are moved between nodes. The number of partitions does not change, nor does the assignment of keys to partitions. The only thing that changes is the assignment of partitions to nodes.
+- the number of partitions configured at the outset is the maximum number of nodes you can have, so you need to choose it high enough to accommodate future growth. To not have to split partitions. 
+- if partitions are very large, rebalancing and recovery from node failures become expensive. But if partitions are too small, they incur too much overhead.
+
+**dynamic partitioning**
+- When a partition grows to exceed a configured size (on HBase, the default is 10 GB), it is split into two partitions so that approximately half of the data ends up on each side of the split.
+- if lots of data is deleted and a partition shrinks below some threshold, it can be merged with an adjacent partition.
+- that the number of partitions adapts to the total data volume. If there is only a small amount of data, a small number of partitions is sufficient. 
+
+**Partitioning proportionally to nodes**
+- A third option, used by Cassandra and Ketama, is to make the number of partitions proportional to the number of nodes — in other words, to have a fixed number of partitions per node. 
+
+It's better to have a human involved in the loop during rebalancing to avoid overloading nodes and creating a cascading failure. 
+
+#### Request Routing
+
+When a client makes a request, how does it know which node to connect to? which IP address and port number to connect to?
+
+Approaches:
+- Allow clients to contact any node. 
+- sends requests from clients to a routing tier first which determines the node that should handle the request. 
+- requires clients to be aware of partitioning and assignment of partitions to nodes. A client can connect directly to the appropriate node, without an intermediary. 
+
+How does the component making the routing decision (which may be one of the nodes, or the routing tier, or the client) learn about changes in the assignment of partitions to nodes?
+- Using Zookeeper to track of partition and node metadata.
+- parallel query execution is also used for massively parallel processing databases. 
+
+### Chapter 7 Transactions
+
+A transaction is a way for an application to group several reads and writes into a logical unit.
+
+This way the system doesn't need to worry about partial failure. It will either succeed (commit) or fail (abort or rollback).
+
+The safety guarantees provided by transactions are often described by the well-known acronym ACID, which stands for **Atomicity, Consistency, Isolation, and Durability**. 
+
+One database’s implementation of ACID does not equal another’s implementation. For example, as we shall see, there is a lot of ambiguity around the meaning of isolation. The devil is in the details.
+
+#### Atomicity
+
+Atomic refers to something that cannot be broken down into smaller parts.
+
+Rather, ACID atomicity describes what happens if a client wants to make several writes, but a fault occurs after some of the writes have been processed. If the writes are grouped together into an atomic transaction, the transaction cannot be completed due to a fault then it is aborted and any changes so far is discarded.
+
+The ability to abort a transaction on error and have all writes from that transaction discarded is the defining feature of ACID atomicity. Perhaps abortability would have been a better term than atomicity.
+
+#### Consistency
+
+In the context of ACID, consistency refers to an application-specific notion of the database being in a “good state.”
+
+The idea of ACID consistency is that you have certain statements about your data (invariants) that must always be true — for example, in an accounting system, credits and debits across all accounts must always be balanced.
+
+This idea of consistency depends on the application’s notion of invariants, and it’s the application’s responsibility to define its transactions correctly so that they preserve consistency. This is not something that the database can guarantee. the letter C doesn’t really belong in ACID.
+
+#### Isolation
+
+Isolation in the sense of ACID means that concurrently executing transactions are isolated from each other: they cannot step on each other’s toes.
+
+The classic database textbooks formalize isolation as serializability, which means that each transaction can pretend that it is the only transaction running on the entire database. The database ensures that when the transactions have committed, the result is the same as if they had run serially (one after another), even though in reality they may have run concurrently.
+
+#### Durability
+
+Durability is the promise that once a transaction has committed successfully, any data it has written will not be forgotten, even if there is a hardware fault or the database crashes.
+
+It usually also involves a write-ahead log or similar (see “Making B-trees reliable”), which allows recovery in the event that the data structures on disk are corrupted. In a replicated database, durability may mean that the data has been successfully copied to some number of nodes.
+
+#### Multi-object operations
+
+Multi-object transactions require some way of determining which read and write operations belong to the same transaction. In relational databases, that is typically done based on the client’s TCP connection to the database server: on any particular connection, everything between a BEGIN TRANSACTION and a COMMIT statement is considered to be part of the same transaction.
+
+Atomicity can be implemented using a log for crash recovery (see “Making B-trees reliable”), and isolation can be implemented using a lock on each object (allowing only one thread to access an object at any one time so no "dirty reads" or reading uncommitted writes).
+
+#### Handling errors
+
+ACID databases are based on this philosophy: if the database is in danger of violating its guarantee of atomicity, isolation, or durability, it would rather abandon the transaction entirely than allow it to remain half-finished.
+
+Retrying an aborted transaction is not perfect:
+- If the transaction actually succeeded, but the network failed while the server tried to acknowledge the successful commit to the client (so the client thinks it failed), then retrying the transaction causes it to be performed twice.
+- If the error is due to overload, retrying the transaction will make the problem worse, not better.
+- It is only worth retrying after transient errors (for example due to deadlock, isolation violation, temporary network interruptions, and failover).
+- if email is scheduled when transaction is completed, multiple emails may be delivered.
+
+#### Weak Isolation levels
 
 
 
