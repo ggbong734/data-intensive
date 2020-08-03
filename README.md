@@ -740,7 +740,7 @@ How does the component making the routing decision (which may be one of the node
 
 ### Chapter 7 Transactions
 
-A transaction is a way for an application to group several reads and writes into a logical unit.
+A transaction is a way for an application to group several reads and writes into a logical unit.Transactions are an abstraction layer that allows an application to pretend that certain concurrency problems and certain kinds of hardware and software faults don’t exist. A large class of errors is reduced down to a simple transaction abort, and the application just needs to try again.
 
 This way the system doesn't need to worry about partial failure. It will either succeed (commit) or fail (abort or rollback).
 
@@ -794,12 +794,128 @@ Retrying an aborted transaction is not perfect:
 
 #### Weak Isolation levels
 
+**Serializable** isolation means that the database guarantees that transactions have the same effect as if they ran serially (i.e., one at a time, without any concurrency).
 
+In practice, isolation is unfortunately not that simple. Serializable isolation has a performance cost, and many databases don’t want to pay that price [8]. It’s therefore common for systems to use weaker levels of isolation, which protect against some concurrency issues, but not all.
 
+**Read Committed**
+> The most basic level of transaction isolation is read committed. It makes two guarantees: When reading from the database, you will only see data that has been committed (no dirty reads). When writing to the database, you will only overwrite data that has been committed (no dirty writes).
+- default isolation level in many databases
+- does not prevent race conditions (concurrency issues) where two clients concurrently increment a counter but the counter only registered an increase of one instead of two.  
 
+Databases **prevent dirty writes** by using row-level locks: when a transaction wants to modify a particular object (row or document), it must first acquire a lock on that object. It must then hold the lock until the transaction is committed or aborted. Only one transaction can hold the lock for any given object.
 
+One way to prevent dirty reads is to lock the object when reading (prevent writes) then release the object once reading is done. But this is not good as even read-only jobs harms response time of other transactions. 
 
+Databases **prevent dirty reads** by remembering the old committed value and the new value for every object that is being written. While the write is not committed, any read on that object is given the old value. 
 
+#### Snapshot Isolation and Repeatable Read
 
+Read committed isolation level may still be susceptible to *nonrepeatable reads* or *read skew*. This is a temporary inconsistency when values change when reads are done during and after the write transactions. However, situations like taking backups and performing analytic queries do not tolerate nonrepeatable reads. 
 
+Databases **prevent nonrepeatable reads/read skew** using *snapshot isolation*.
+> The idea is that each transaction reads from a consistent snapshot of the database - even if data is subsequently changed by another transaction, each transaction only see the old data from that particular point in time.
+
+Implementations of snapshot isolation typically use write locks to prevent dirty writes.
+
+However, reads do not require any locks. From a performance point of view, a key principle of snapshot isolation is readers never block writers, and writers never block readers.7-4. The database must potentially keep several different committed versions of an object, because various in-progress transactions may need to see the state of the database at different points in time. This technique is known as *multi-version concurrency control* (MVCC).
+
+A typical approach is that read committed uses a separate snapshot for each query, while snapshot isolation uses the same snapshot for an entire transaction.
+
+**visibility rules for observing a consistent snapshot**
+- At the start of each transaction, the database makes a list of all the other transactions that are in progress (not yet committed or aborted) at that time. Any writes that those transactions have made are ignored, even if the transactions subsequently commit.
+- Any writes made by aborted transactions are ignored.
+- Any writes made by transactions with a later transaction ID (i.e., which started after the current transaction started) are ignored.
+
+An object is only visible if:
+- At the time when the reader’s transaction started, the transaction that created the object had already committed.
+- The object is not marked for deletion, or if it is, the transaction that requested deletion had not yet committed at the time when the reader’s transaction started.
+
+Snapshot isolation is also called **serializable** or **repeatable read** by different databases. Unfortunately the standard definition of repeable read is often ambiguous, inconsistent when applied by databases.
+
+#### Preventing lost updates (write-write conflict)
+
+Concurrent writes may result in one of the writes being overwritten by the second one as each transaction does a read-modify-write. The transactions read the same value but modify them to different values and do not consider the other one. 
+
+Solutions:
+- Atomic writes: avoid read-modify-write cycles by representing writes in atomic operations. Implemented by taking an exclusive lock on the object when it is read. 
+- Explicit locking: lock the object until the first read-modify-write cycle is completed before the next one can occur. But easy to forget to add a lock in the code, thus introducing a race condition.
+- Automatic deletion of lost updates: Allow transactions to occur in parallel and when a lost update is detected, the transaction (read-modify-write) cycle is retried. Less error prone than using explicit locking. 
+- Compare and set: only allow an update to happen only if the value has not changed since we last read it. If there is a mismatch, the read-modify-write cycle must be retried. May not work if the database reads from a snapshot while another write is taking place. 
+- In replicated databases, locks and compare-and-set may not be sufficient as there could be multiple up-to-date copy of a the data. Need to apply linearizability. A common approach in replicated databases is to allow concurrent writes to create several conflicting versions of a value (siblings) and merge them using special data structure. 
+
+#### Write skew
+
+Write skew as a generalization of the lost update problem. Write skew can occur if two transactions read the same objects, and then update some of those objects (different transactions may update different objects).
+
+Automatically preventing write skew requires true serializable isolation.
+
+The second-best option in this case is probably to explicitly lock the rows that the transaction depends on. Using the `FOR UPDATE` clause in SQL to lock the row that might be read by another transaction.
+
+#### Serializability
+
+Serializable isolation is usually regarded as the strongest isolation level. It guarantees that even though transactions may execute in parallel, the end result is the same as if they had executed one at a time, serially, without any concurrency. In other words, database prevents all possible race condition. 
+
+Serializable isolation is done using one of these three methods.
+
+**Actual Serial Execution**
+- to execute only one transaction at a time, in serial order, on a single thread (one computer CPU).
+- only recently do people think that a single-thread can execute at good performance because RAM because cheap enough to put entire dataset in memory.
+- throughput limited to that of a single CPU core. 
+
+**Stored procedure**
+- encapsulates a series of transactions
+- with single threaded processing, multi-statement transactions are not efficient, instead the entire transaction dode can be submitted as a stored procedure. This saves on network cost. less back and forth between database and application. 
+- stored procedures can also be used during replication. Instead of copying a write at a time, stored procedure can be executed on each replica. This requires that stored procedures are deterministic (i.e. same result when run on different nodes).
+
+For applications with high write throughput, the single-threaded transaction processor can become a serious bottleneck. One way is to partition the dataset so that each transaction only reads and writes data within a single partition such that each partition can have a dedicated CPU core. For any transaction that needs to access multiple partitions, the database must coordinate the transaction across all the partitions that it touches, and because of this is vastly slower than single partition transactions.
+
+**Two-Phase Locking (2PL)**
+- use shared lock when reading an object (share the lock with other transactions that want to read the object)
+- use exclusive lock when writing an object (only allow one transaction to write)
+- reads block writes, and writes blocks reads (and other writes). Contrast with snapshot isolation where readers never block writers and writers never block readers. Thus 2PL is more strict than snapshot isolation because it has to prevent the race conditions (concurrency issues like lost updates, and write skew).
+- downside is that response times of queries, transaction throughput are much worse under 2PL than under weak isolationdue to overhead of acquiring and releasing all the locks. But also from reduced concurrency (only one writes at a time).
+- databases running 2PL can have very slow latencies at high percentiles (unstable)
+
+**predicate locks**
+- It works similarly to the shared/ exclusive lock described earlier, but rather than belonging to a particular object (e.g., one row in a table), it belongs to all objects that match some search condition.
+- prevent phantom writes - that is, one transaction changing the results of another transaction’s search query. Phantom writes have to be prevented for serializable isolation level.
+- key idea here is that a predicate lock applies even to objects that do not yet exist in the database, but which might be added in the future (phantoms).
+
+Predicate locks may be time-consuming if there are many locks by active transactions. Most databases implement **index-range locking**, a simplified approximation of predicate locking. 
+- The idea is to simplify a predicate by making it match a greater set of objects. For example, if you have a predicate lock for bookings of room 123 between noon and 1 p.m., you can approximate it by locking bookings for room 123 at any time.
+- The whole index is locked instead of the particular combination of room and time. 
+- Index-range locks are not as precise as predicate locks (they lock a bigger range of objects) but they have much lower overheads. 
+
+**Serializable Snapshot Isolation (SSI)**
+
+This is a new algorithm to remedy the issues of serializable and snapshot isolation: Serializable don't perform well (two-phase locking) or don't scale well (serial execution) while weak isolation levels are prone to race conditions. When a transaction wants to commit, it is checked, and it is aborted if the execution was not serializable.
+
+*Serializable snapshot isolation* is an optimistic concurrency control technique. Optimistic in this context means that instead of blocking if something potentially dangerous happens, transactions continue anyway, in the hope that everything will turn out all right. SSI allowing transactions to proceed without blocking like in 2PL.
+- one of the way this algorithm works is by detecting stale MVCC (multi-version concurrency control) reads, recall that MVCC is the common strategy in snapshot isolation.
+- another strategy is to detect writes that affect prior reads. The concurrent write which is committed later will be aborted. 
+
+Compared to two-phase locking, the big advantage of serializable snapshot isolation is that one transaction doesn’t need to block waiting for locks held by another transaction. Like under snapshot isolation, writers don’t block readers, and vice versa. This design principle makes query latency much more predictable and less variable. In particular, read-only queries can run on a consistent snapshot without requiring any locks.
+
+Compared to serial execution, serializable snapshot isolation is not limited to the throughput of a single CPU core: Even though data may be partitioned across multiple machines, transactions can read and write data in multiple partitions while ensuring serializable isolation.
+
+SSI requires that read-write transactions be fairly short. However, SSI is probably less sensitive to slow transactions than two-phase locking or serial execution.
+
+### Chapter 8 The Trouble with Distributed Systems
+
+This chapter looks at an overview of things that may go wrong in a distributed systems such as network issues, clock and timing issues.
+
+Single computers have a fully functional or entirely broken status making them easy to diagnose unlike distributed systems which may have partial failures. The challenge is that partial failures are non-deterministic: sometimes it works and sometimes it  unpredictably fails.
+
+The fault handling must be part of the software design, and you (as operator of the software) need to know what behavior to expect from the software in the case of a fault. In distributed systems, suspicion, pessimism, and paranoia pay off.
+
+The internet and most internal networks in datacenters (often Ethernet) are asynchronous packet networks. In this kind of network, one node can send a message (a packet) to another node, but the network gives no guarantees as to when it will arrive, or whether it will arrive at all.
+
+The sender can’t even tell whether the packet was delivered: the only option is for the recipient to send a response message, which may in turn be lost or delayed. If you send a request to another node and don’t receive a response, it is impossible to tell why. The usual way of handling this issue is a timeout: after some time you give up waiting and assume that the response is not going to arrive.
+
+Most systems we work with have neither of those guarantees: asynchronous networks have unbounded delays (that is, they try to deliver packets as quickly as possible, but there is no upper limit on the time it may take for a packet to arrive), and most server implementations cannot guarantee that they can handle requests within some maximum time.
+
+You can only choose timeouts experimentally: measure the distribution of network round-trip times over an extended period, and over many machines, to determine the expected variability of delays.
+
+Rather than using configured constant timeouts, systems can continually measure response times and their variability (jitter), and automatically adjust timeouts according to the observed response time distribution.
 
