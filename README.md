@@ -963,4 +963,27 @@ Many programming language runtimes (such as the Java Virtual Machine) have a gar
 A virtual machine can be suspended (pausing the execution of all processes and saving the contents of memory to disk). This pause can occur at any time in a process’s execution and can last for an arbitrary length of time. This feature is sometimes used for live migration of virtual machines from one host to another without a reboot.
 
 A distributed system has no shared memory — only messages sent over an unreliable network. A node in a distributed system must assume that its execution can be paused for a significant length of time at any point, even in the middle of a function. During the pause, the rest of the world keeps moving and may even declare the paused node dead because it’s not responding.
-. 
+.
+
+**Real-time** means that a system is carefully designed and tested to meet specified timing guarantees in all circumstances.
+
+An enormous amount of testing and measurement must be done to ensure that guarantees are being met.
+
+For these reasons, developing real-time systems is very expensive, and they are most commonly used in safety-critical embedded devices. Most server-side data processing systems, real-time guarantees are simply not economical or appropriate. Consequently, these systems must suffer the pauses and clock instability that come from operating in a non-real-time environment.
+
+#### Knowledge, Truth, and Lies
+
+With regard to timing assumptions, three system models are in common use:
+
+- Synchronous model The synchronous model assumes bounded network delay, bounded process pauses, and bounded clock error. In other words: network delay, pauses, and clock drift will never exceed some fixed upper bound.
+- Partially synchronous model Partial synchrony means that a system behaves like a synchronous system most of the time, but it sometimes exceeds the bounds for network delay, process pauses, and clock drift. This is a realistic model of many systems: most of the time, networks and processes are quite well behaved.
+- Asynchronous model In this model, an algorithm is not allowed to make any timing assumptions — in fact, it does not even have a clock (so it cannot use timeouts). Very restrictive.
+
+Most common type of node failure assumption:
+- Crash-recovery faults: We assume that nodes may crash at any moment, and perhaps start responding again after some unknown time. In the crash-recovery model, nodes are assumed to have stable storage (i.e., nonvolatile disk storage) that is preserved across crashes, while the in-memory state is assumed to be lost.
+
+Theoretical analysis can uncover problems in an algorithm that might remain hidden for a long time in a real system. They are incredibly helpful for distilling down the complexity of real systems to a manageable set of faults that we can reason about, so that we can understand the problem and try to solve it systematically.
+
+Theoretical analysis and empirical testing are equally important.
+
+### Chapter 9 Consistency and Consensus
