@@ -987,3 +987,76 @@ Theoretical analysis can uncover problems in an algorithm that might remain hidd
 Theoretical analysis and empirical testing are equally important.
 
 ### Chapter 9 Consistency and Consensus
+
+Similar to transactions in chapter 7 where we assume by using a transaction, the application can pretend that there are no crashes (atomicity), that nobody else is concurrently accessing the database (isolation), and that storage devices are perfectly reliable (durability).
+
+One of the most important abstractions for distributed systems is consensus: that is, getting all of the nodes to agree on something. 
+
+First need to explore the range of guarantees and abstractions that can be provided in a distributed system.
+
+
+#### Consistency Guarantees
+
+If you look at two database nodes at the same moment in time, you’re likely to see different data on the two nodes, because write requests arrive on different nodes at different times.
+
+Most replicated databases provide at least eventual consistency, which means that if you stop writing to the database and wait for some unspecified length of time, then eventually all read requests will return the same value.
+
+A better name for eventual consistency may be convergence, as we expect all replicas to eventually converge to the same value.
+But this is a weak guarantee as it doesn’t say anything about when the replicas will converge.
+
+we will explore stronger consistency models that data systems may choose to provide. They don’t come for free: systems with stronger guarantees may have worse performance or be less fault-tolerant than systems with weaker guarantees.
+
+Some similarity between distributed consistency models and the hierarchy of transaction isolation levels we discussed previously.
+Transaction isolation is primarily about avoiding race conditions due to concurrently executing transactions, whereas distributed consistency is mostly about coordinating the state of replicas in the face of delays and faults.
+
+We will start by looking at one of the strongest consistency models in common use, linearizability.
+
+#### Linearizability
+
+In an eventually consistent database, if you ask two different replicas the same question at the same time, you may get two different answers. That’s confusing. Wouldn’t it be a lot simpler if the database could give the illusion that there is only one replica (i.e., only one copy of the data)? Then every client would have the same view of the data, this is the idea behind linearizability.
+
+The basic idea is to make a system appear as if there were only one copy of the data, and all operations on it are atomic. With this guarantee, even though there may be multiple replicas in reality, the application does not need to worry about them.
+
+In a linearizable system, as soon as one client successfully completes a write, all clients reading from the database must be able to see the value just written. In other words, linearizability is a recency guarantee.
+
+Distinction between Serializability and Linearizability:
+- Serializability is an isolation property of transactions, where every transaction may read and write multiple objects (rows, documents, records). It guarantees that transactions behave the same as if they had executed in some serial order (each transaction running to completion before the next transaction starts).
+- Linearizability is a recency guarantee on reads and writes of a register (an individual object). It doesn’t group operations together into transactions, so it does not prevent problems such as write skew
+
+A database may provide both serializability and linearizability, and this combination is known as strict serializability.
+
+Serializable snapshot isolation (see “Serializable Snapshot Isolation (SSI)”) is not linearizable: by design, it makes reads from a consistent snapshot, it does not include writes that are more recent than the snapshot, and thus reads from the snapshot are not linearizable.
+
+If you want to ensure that two people don’t concurrently book the same seat on a flight or in a theater, this requires there to be a single up-to-date value (the account balance, the stock level, the seat occupancy) that all nodes agree on (i.e. linearizability).
+
+Problem arises because there are two different communication channels between the web server and the resizer: the file storage and the message queue. Without the recency guarantee of linearizability, race conditions between these two channels are possible. If the file storage service is linearizable, then this system should work fine.
+
+In a system with single-leader replication , the leader has the primary copy of the data that is used for writes, and the followers maintain backup copies of the data on other nodes. If you make reads from the leader, or from synchronously updated followers, they have the potential to be linearizable.
+
+Systems with multi-leader replication are generally not linearizable, because they concurrently process writes on multiple nodes and asynchronously replicate them to other nodes.
+
+In system with leaderless replication using strict quorum reads and writes (w+r > n), it is not quite linearizable. it is safest to assume that a leaderless system with Dynamo-style replication does not provide linearizability.
+
+“Last write wins” conflict resolution methods based on time-of-day clocks (e.g., in Cassandra) are almost certainly nonlinearizable, because clock timestamps cannot be guaranteed to be consistent with actual event ordering due to clock skew.
+
+#### Cost of Linearizability
+
+For a single leader setup in multiple datacenters , if there is a network interruption between the two datacenters, causes the application to become unavailable in the datacenters that cannot contact the leader, clients that can only reach a follower datacenter will experience an outage until the network link is repaired.
+
+The trade-off is as follows:
+- If your application requires linearizability, and some replicas are disconnected from the other replicas due to a network problem, then some replicas cannot process requests while they are disconnected: they must either wait until the network problem is fixed, or return an error (either way, they become unavailable).
+- If your application does not require linearizability, then it can be written in a way that each replica can process requests independently, even if it is disconnected from other replicas (e.g., multi-leader). In this case, the application can remain available in the face of a network problem, but its behavior is not linearizable.
+
+Thus, applications that don’t require linearizability can be more tolerant of network problems.
+
+Many distributed databases that choose not to provide linearizable guarantees: they do so primarily to increase performance, not so much for fault tolerance. Linearizability is slow — and this is true all the time, not only during a network fault.
+
+One way of describing the trade-off is with the CAP theorem, either Consistent (linearizable) or Available (no down nodes) when Partitioned (or have network faults). A more reliable network needs to make this choice less often, but at some point the choice is inevitable.
+
+#### Ordering Guarantees
+
+Causality imposes an ordering on events: cause comes before effect; a message is sent before that message is received; the question comes before the answer.
+
+If a system obeys the ordering imposed by causality, we say that it is causally consistent. For example, snapshot isolation provides causal consistency: when you read from the database, and you see some piece of data, then you must also be able to see any data that causally precedes it (assuming it has not been deleted in the meantime).
+
+According to this definition, there are no concurrent operations in a linearizable datastore: there must be a single timeline along which all operations are totally ordered. There might be several requests waiting to be handled, but the datastore ensures that every request is handled atomically at a single point in time, acting on a single copy of the data, along a single timeline, without any concurrency.
