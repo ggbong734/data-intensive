@@ -1060,3 +1060,166 @@ Causality imposes an ordering on events: cause comes before effect; a message is
 If a system obeys the ordering imposed by causality, we say that it is causally consistent. For example, snapshot isolation provides causal consistency: when you read from the database, and you see some piece of data, then you must also be able to see any data that causally precedes it (assuming it has not been deleted in the meantime).
 
 According to this definition, there are no concurrent operations in a linearizable datastore: there must be a single timeline along which all operations are totally ordered. There might be several requests waiting to be handled, but the datastore ensures that every request is handled atomically at a single point in time, acting on a single copy of the data, along a single timeline, without any concurrency.
+
+#### Causal consistency
+
+Linearizability is not the only way of preserving causality — there are other ways too. A system can be causally consistent without incurring the performance hit of making it linearizable
+
+In many cases, systems that appear to require linearizability in fact only really require causal consistency, which can be implemented more efficiently.
+
+In order to maintain causality, you need to know which operation happened before which other operation. In order to determine the causal ordering, the database needs to know which version of the data was read by the application.
+
+Actually keeping track of all causal dependencies can become impracticable. Explicitly tracking all the data that has been read would mean a large overhead. 
+
+It can instead come from a logical clock, which is an algorithm to generate a sequence of numbers to identify operations, typically using counters. Such sequence numbers or timestamps are compact (only a few bytes in size), and they provide a total order: that is, every operation has a unique sequence number, and you can always compare two sequence numbers to determine which is greater. Concurrent operations may be ordered arbitrarily.
+
+If there is not a single leader (perhaps because you are using a multi-leader or leaderless database, or because the database is partitioned), it is less clear how to generate sequence numbers for operations. Other methods include:
+- Each node can generate its own independent set of sequence numbers. For example, if you have two nodes, one node can generate only odd numbers and the other only even numbers. This would ensure that two different nodes can never generate the same sequence number.
+- Attach a timestamp from a time-of-day clock (physical clock) to each operation. This is used in last write wins conflict resolution method.
+- Preallocate blocks of sequence numbers. For example, node A might claim the block of sequence numbers from 1 to 1,000, and node B might claim the block from 1,001 to 2,000.
+
+However, they all have a problem: the sequence numbers they generate are not consistent with causality. If one node generates even numbers and the other generates odd numbers, the counter for even numbers may lag behind the counter for odd numbers, you cannot accurately tell which one causally happened first. Similarly timestamps from physical clocks are subject to clock skew which makes them inconsistent with causality.
+
+**Lamport timestamps**
+- Each node has a unique identifier, and each node keeps a counter of the number of operations it has processed. The Lamport timestamp is then simply a pair of (counter, node ID). Each timestamp is made unique. 
+- The counter keeps incrementing up. Every node and every client keeps track of the maximum counter value it has seen so far.
+- if you have two timestamps, the one with a greater counter value is the greater timestamp; if the counter values are the same, the one with the greater node ID is the greater timestamp.
+
+However, Lamport timestamps are not quite sufficient to solve many common problems in distributed systems.
+
+In order to implement something like a uniqueness constraint for usernames, it’s not sufficient to have a total ordering of operations — you also need to know when that order is finalized.
+
+#### Total order broadcast
+
+Total order broadcast is usually described as a protocol for exchanging messages between nodes. Informally, it requires that two safety properties always be satisfied: 
+- Reliable delivery No messages are lost: if a message is delivered to one node, it is delivered to all nodes. 
+- Totally ordered delivery Messages are delivered to every node in the same order.
+
+Another way of looking at total order broadcast is that it is a way of creating a log, delivering a message is like appending to the log.
+
+To build a linearizable compare-and-set operation from total order broadcast:
+You can sequence writes through the log by appending a message, reading the log, and performing the actual write when the message is delivered back to you. If the first message is from another user, then abort the operation.
+
+Sequential consistency sometimes also known as timeline consistency is a slightly weaker guarantee than linearizability.
+
+It can be proved that a linearizable compare-and-set (or increment-and-get) register and total order broadcast are both equivalent to consensus. 
+
+#### Distributed Transactions and Consensus
+
+Consensus: the goal is simply to get several nodes to agree on something.
+
+There are a number of situations in which it is important for nodes to agree. For example:
+
+Leader election 
+- In a database with single-leader replication, all nodes need to agree on which node is the leader. The leadership position might become contested if some nodes can’t communicate with others due to a network fault. In this case, consensus is important to avoid a bad failover, resulting in a split brain situation.
+
+Atomic commit 
+- In a database that supports transactions spanning several nodes or partitions, we have the problem that a transaction may fail on some nodes but succeed on others.If we want to maintain transaction atomicity (in the sense of ACID; see “Atomicity”), we have to get all nodes to agree on the outcome of the transaction: either they all abort/ roll back (if anything goes wrong) or they all commit (if nothing goes wrong).
+
+
+#### Atomic commit and two-phase commit
+
+To fulfill transaction atomicity, the outcome of a transaction is either a successful commit, in which case all of the transaction’s writes are made durable, or an abort, in which case all of the transaction’s writes are rolled back. Atomicity prevents failed transactions from littering the database with half-finished results and half-updated state.
+
+Thus, on a single node, transaction commitment crucially depends on the order in which data is durably written to disk: first the data, then the commit record [72]. The key deciding moment for whether the transaction commits or aborts is the moment at which the disk finishes writing the commit record: before that moment, it is still possible to abort (due to a crash), but after that moment, the transaction is committed (even if the database crashes).
+
+If multiple nodes are involved in a transaction, if some nodes commit the transaction but others abort it, the nodes become inconsistent with each other. For this reason, a node must only commit once it is certain that all other nodes in the transaction are also going to commit.
+
+A transaction commit must be irrevocable — you are not allowed to change your mind and retroactively abort a transaction after it has been committed.
+
+**Two phase commit**
+- Two-phase commit is an algorithm for achieving atomic transaction commit across multiple nodes — i.e., to ensure that either all nodes commit or all nodes abort. tplit into two phases.
+- A 2PC transaction begins with the application reading and writing data on multiple database nodes, as normal.
+- When the application is ready to commit, the coordinator begins phase 1: it sends a prepare request to each of the nodes, asking them whether they are able to commit.
+- If any of the participants replies “no,” the coordinator sends an abort request to all nodes in phase 2.
+- If all participants reply “yes,” indicating they are ready to commit, then the coordinator sends out a commit request in phase 2, and the commit actually takes place.
+- 2PC uses a new component that does not normally appear in single-node transactions: a coordinator (also known as transaction manager).
+
+The protocol contains two crucial “points of no return”: when a participant votes “yes,” it promises that it will definitely be able to commit later (although the coordinator may still choose to abort); and once the coordinator decides, that decision is irrevocable. Those promises ensure the atomicity of 2PC.
+
+The coordinator must write its commit or abort decision to a transaction log on disk before sending commit or abort requests to participants: when the coordinator recovers, it determines the status of all in-doubt transactions by reading its transaction log. Any transactions that don’t have a commit record in the coordinator’s log are aborted. Thus, the commit point of 2PC comes down to a regular single-node atomic commit on the coordinator.
+
+Much of the performance cost inherent in two-phase commit is due to the additional disk forcing (fsync) that is required for crash recovery [88], and the additional network round-trips.
+
+**Exactly once messaging**
+- For example, say a side effect of processing a message is to send an email, and the email server does not support two-phase commit: it could happen that the email is sent two or more times if message processing fails and is retried.
+
+#### XA transactions
+
+X/Open XA (Extended Architecture) is a standard for implementing two-phase commit across heterogeneous databases (different systems). It is not a network protocol but an API for interfacing with transaction coordinator. 
+
+If the appplication network driver supports XA, that means it calls the XA API to find out whether an operation should be part of a distributed transaction — and if so, it sends the necessary information to the database server.
+
+The transaction coordinator implements the XA API. It keeps track of the participants in a transaction, collects partipants’ responses after asking them to prepare, and uses a log on the local disk to keep track of the commit/ abort decision for each transaction.
+
+If the application process crashes, the coordinator goes with it. Since the coordinator’s log is on the application server’s local disk, that server must be restarted, and the coordinator library must read the log to recover the commit/ abort outcome of each transaction. Only then can the coordinator use the database driver’s XA callbacks to ask participants to commit or abort.
+
+Database transactions usually take a row-level exclusive lock on any rows they modify, to prevent dirty writes. In addition, if you want serializable isolation, a database using two-phase locking would also have to take a shared lock on any rows read by the transaction. Therefore, when using two-phase commit, a transaction must hold onto the locks throughout the time it is in doubt. If the coordinator has crashed and takes 20 minutes to start up again, those locks will be held for 20 minutes.
+
+While those locks are held, no other transaction can modify those rows. Depending on the database, other transactions may even be blocked from reading those rows. This can cause large parts of your application to become unavailable until the in-doubt transaction is resolved.
+
+In practice, orphaned in-doubt transactions do occur [89, 90] — that is, transactions for which the coordinator cannot decide the outcome for whatever reason. These transactions cannot be resolved automatically, so they sit forever in the database, holding locks and blocking other transactions. The only way out is for an administrator to manually decide whether to commit or roll back the transactions.
+
+
+XA implementations have an emergency escape hatch called heuristic decisions: allowing a participant to decide to abort or commit an in-doubt transaction without a definitive decision from the coordinator. Heuristic here is a euphemism for probably breaking atomicity, since the heuristic decision violates the system of promises in two-phase commit.
+
+XA does not work with SSI (Serializable Snapshot Isolation), since that would require a protocol for identifying conflicts across different systems. For database-internal distributed transactions (not XA), the limitations are not so great — for example, a distributed version of SSI is possible.
+
+#### Fault tolerant consensus
+
+The consensus problem is normally formalized as follows: one or more nodes may propose values, and the consensus algorithm decides on one of those values.
+
+Properties a consensus algorithm must satisfy:
+- Uniform agreement: No two nodes decide differently. 
+- Integrity: No node decides twice. 
+- Validity:  If a node decides value v, then v was proposed by some node. 
+- Termination: Every node that does not crash eventually decides some value.
+
+The termination property formalizes the idea of fault tolerance. It essentially says that a consensus algorithm cannot simply sit around and do nothing forever. Even if some nodes fail, the other nodes must still reach a decision.
+
+There is a limit to the number of failures that an algorithm can tolerate: in fact, it can be proved that any consensus algorithm requires at least a majority of nodes to be functioning correctly in order to assure termination.
+
+There is a limit to the number of failures that an algorithm can tolerate: in fact, it can be proved that any consensus algorithm requires at least a majority of nodes to be functioning correctly in order to assure termination.
+
+To implement consensus algorithm, protocols define an epoch number (called the ballot number in Paxos, view number in Viewstamped Replication, and term number in Raft) and guarantee that within each epoch, the leader is unique. Epoch numbers are totally ordered and monotonically increasing.
+
+If there is a conflict between two different leaders in two different epochs (perhaps because the previous leader actually wasn’t dead after all), then the leader with the higher epoch number prevails.
+
+Before a leader is allowed to decide anything, it must first check that there isn’t some other leader with a higher epoch number which might take a conflicting decision.
+
+We have two rounds of voting: once to choose a leader, and a second time to vote on a leader’s proposal. if the vote on a proposal does not reveal any higher-numbered epoch, the current leader can conclude that no leader election with a higher epoch number has happened, and therefore be sure that it still holds the leadership.
+
+The biggest differences between consensus algorithm with 2PC is that in 2PC the coordinator is not elected, and that fault-tolerant consensus algorithms only require votes from a majority of nodes, whereas 2PC requires a “yes” vote from every participant.
+
+The benefits come at a cost. The process by which nodes vote on proposals before they are decided is a kind of synchronous replication. As discussed in “Synchronous Versus Asynchronous Replication”, databases are often configured to use asynchronous replication. Consensus systems always require a strict majority to operate. This means you need a minimum of three nodes in order to tolerate one failure (the remaining two out of three form a majority), or a minimum of five nodes to tolerate two failures. 
+
+Consensus systems generally rely on timeouts to detect failed nodes. Sometimes, consensus algorithms are particularly sensitive to network problems.
+
+Some inmportant features of coordination services:
+- linearizable atomic operations (requires consensus protocol)
+- Total ordering of operations (requires fencing token that is monotonically increasing)
+- Failure detection (client and server exchange heartbeats to check if other node is alive)
+- Change notifications (each client can read locks and values created by another client)
+
+Some consensus systems support read-only caching replicas. These replicas asynchronously receive the log of all decisions of the consensus algorithm, but do not actively participate in voting. They are therefore able to serve read requests that do not need to be linearizable.
+
+## Part 3 Derived Data
+
+Two types of data storage:
+
+- **Systems of record**: A system of record, also known as source of truth, holds the authoritative version of your data. When new data comes in, e.g., as user input, it is first written here. Each fact is represented exactly once (the representation is typically normalized).
+
+- **Derived data systems**: Data in a derived system is the result of taking some existing data from another system and transforming or processing it in some way.
+
+Derived data is redundant, in the sense that it duplicates existing information. However, it is often essential for getting good performance on read queries. It is commonly denormalized. You can derive several different datasets from a single source, enabling you to look at the data from different “points of view.”
+
+#### Chapter 10 Batch Processing
+
+
+Kleppmann, Martin. Designing Data-Intensive Applications (p. 534). O'Reilly Media. Kindle Edition. 
+
+Kleppmann, Martin. Designing Data-Intensive Applications (p. 534). O'Reilly Media. Kindle Edition. 
+
+Kleppmann, Martin. Designing Data-Intensive Applications (p. 534). O'Reilly Media. Kindle Edition. 
+
+Kleppmann, Martin. Designing Data-Intensive Applications (p. 534). O'Reilly Media. Kindle Edition. 
