@@ -1301,7 +1301,7 @@ In order to achieve good throughput in a batch process, the computation must be 
 
 One approach to joining tables will be to create a copy of the other table into the same HDFS, then MapReduce could be used to process the records in the same place efficiently.
 
-In sort-merge join, the mapper(s) output is sorted by key, and the reducers then merge together the sorted lists of records from both sides of the join. In a sort-merge join, the mappers and the sorting process make sure that all the necessary data to perform the join operation for a particular user ID is brought together in the same place: a single call to the reducer.
+In **sort-merge join**, the mapper(s) output is sorted by key, and the reducers then merge together the sorted lists of records from both sides of the join. In a sort-merge join, the mappers and the sorting process make sure that all the necessary data to perform the join operation for a particular user ID is brought together in the same place: a single call to the reducer.
 
 Since MapReduce handles all network communication, it also shields the application code from having to worry about partial failures, such as the crash of another node: MapReduce transparently retries failed tasks without affecting the application logic.
 
@@ -1322,7 +1322,7 @@ However, the downside of reduce side join is that all that sorting, copying to r
 If you can make certain assumptions about your input data, it is possible to make joins faster by using a so-called map-side join. This approach uses a cut-down MapReduce job in which there are no reducers and no sorting. Instead, each mapper simply reads one input file block from the distributed filesystem and writes one output file to the filesystem — that is all.
 
 - The simplest way of performing a map-side join applies in the case where a large dataset is joined with a small dataset. The small dataset needs to be small enough that it can be loaded entirely into memory in each of the mappers. THis is called **broadcast hash join**. So the small input is effectively “broadcast” to all partitions of the large input.
-- If the inputs to the map-side join are partitioned in the same way, then the hash join approach can be applied to each partition independently. This approach only works if both of the join’s inputs have the same number of partitions, with records assigned to partitions based on the same key and the same hash function.
+- **partition hash joins**: If the inputs to the map-side join are partitioned in the same way, then the hash join approach can be applied to each partition independently. This approach only works if both of the join’s inputs have the same number of partitions, with records assigned to partitions based on the same key and the same hash function.
 - Another variant of a map-side join applies if the input datasets are not only partitioned in the same way, but also sorted based on the same key. So called **map-side merge joins**. If a map-side merge join is possible, it probably means that prior MapReduce jobs brought the input datasets into this partitioned and sorted form in the first place.
 
 It is important to know the number of partitions and the keys by which the data is partitioned and sorted.
@@ -1342,3 +1342,107 @@ By treating inputs as immutable and avoiding side effects (such as writing to ex
 
 the design principles that worked well for Unix also seem to be working well for Hadoop — but Unix and Hadoop also differ in some ways. On Hadoop, some of those low-value syntactic conversions are eliminated by using more structured file formats: Avro are often used, as they provide efficient schema-based encoding and allow evolution of their schemas over time.
 
+#### Hadoop versus traditional distributed databases
+
+Hadoop is somewhat like a distributed version of Unix, where HDFS is the filesystem and MapReduce is a quirky implementation of a Unix process (which happens to always run the sort utility between the map phase and the reduce phase).
+
+Hadoop distributed filesystem (HDFS) supports data encoded in any format.
+
+To put it bluntly, Hadoop opened up the possibility of indiscriminately dumping data into HDFS, and only later figuring out how to process it further. By contrast, massively parallel processing (MPP) databases typically require careful up-front modeling of the data and query patterns before importing the data into the database’s proprietary storage format.
+
+In practice, it appears that simply making data available quickly — even if it is in a quirky, difficult-to-use, raw format — is often more valuable than trying to decide on the ideal data model up front.
+
+Simply dumping data in its raw form allows for several such transformations. This approach has been dubbed the sushi principle: “raw data is better”.
+
+Hadoop has often been used for implementing ETL processes: data from transaction processing systems is dumped into the distributed filesystem in some raw form, and then MapReduce jobs are written to clean up that data, transform it into a relational form, and import it into an MPP data warehouse for analytic purposes.
+
+In MPP databases, they are optimized for querying using SQL. But not all kinds of processing can be sensibly expressed as SQL queries. Some applications require writing code not just queries. MapReduce gave engineers the ability to easily run their own code over large datasets. If you have HDFS and MapReduce, you can build a SQL query execution engine on top of it, and indeed this is what the Hive project did.
+
+MapReduce”). Having two processing models, SQL and MapReduce, was not enough: even more different models were needed! And due to the openness of the Hadoop platform, it was feasible to implement a whole range of approaches, which would not have been possible within the confines of a monolithic MPP database.
+
+In the Hadoop approach, there is no need to import the data into several different specialized systems for different kinds of processing: the system is flexible enough to support a diverse set of workloads within the same cluster. Not having to move data around makes it a lot easier to derive value from the data, and a lot easier to experiment with new processing models.
+
+When comparing MapReduce to MPP databases, two more differences in design approach stand out: the handling of faults and the use of memory and disk. The MapReduce approach is more appropriate for larger jobs: jobs that process so much data and run for such a long time that they are likely to experience at least one task failure along the way.
+
+MapReduce is designed to tolerate frequent unexpected task termination. In an environment where tasks are not so often terminated, the design decisions of MapReduce make less sense.
+
+#### Beyond Map Reduce
+
+Implementing a complex processing job using the raw MapReduce APIs is actually quite hard and laborious — for instance, any join algorithms used by the job would need to be implemented from scratch.
+
+On the one hand, MapReduce is very robust: you can use it to process almost arbitrarily large quantities of data on an unreliable multi-tenant system with frequent task terminations, and it will still get the job done (albeit slowly). On the other hand, other tools are sometimes orders of magnitude faster for some kinds of processing.
+
+**materialization**
+> The process of computing the result of some operation eagerly and writing it out, rather than computing it on demand when requested.
+
+In a workflow with many MapReduce jobs, the output of a task is stored in a file in the distributed filesystem which serves as intermediate state, so it can be be used as input to the next task. In contrast with Unix pipelines, pipes in Unix do not fully materialize the intermediate state, but instead stream one command’s output to the next command’s input incrementally, using only a small in-memory buffer.
+
+MapReduce’s approach of fully materializing intermediate state has downsides compared to Unix pipes:
+- A MapReduce job can only start when all tasks in the preceding jobs (that generate its inputs) have completed, whereas processes connected by a Unix pipe are started at the same time, with output being consumed as soon as it is produced.
+- Mappers are often redundant: they just read back the same file that was just written by a reducer. In many cases, the mapper code could be part of the previous reducer.
+- Storing intermediate state in a distributed filesystem means those files are replicated across several nodes, which is a waste.
+
+There are new execution engines for distributed batch computations such as Spark and Flink (dataflow engines. They handle an entire workflow as one job, rather than breaking it up into independent subjobs.
+
+Unlike in MapReduce, the new dataflow engines can use user-defined functions (operators) which need not take the strict roles of alternating map and reduce.
+
+The dataflow engine provides several different options for connecting one operator’s output to another’s input:
+- repartition and sort records by key, like in the shuffle stage of MapReduce. enables sort-merge joins and grouping in the same way as in MapReduce.
+- Another possibility is to take several inputs and to partition them in the same way, but skip the sorting. This saves effort on partitioned hash joins, where the partitioning of records is important but the order is irrelevant because building the hash table randomizes the order anyway.
+- For broadcast hash joins, the same output from one operator can be sent to all partitions of the join operator.
+
+The advantages of the flexibility of new dataflow engines compared to MapReduce are:
+- Expensive work such as sorting need only be performed in places where it is actually required, rather than always happening by default between every map and reduce stage.
+- There are no unnecessary map tasks, since the work done by a mapper can often be incorporated into the preceding reduce operator.
+- The scheduler has an overview of what data is required where, so it can make locality optimizations.
+- It's usually sufficient for intermediate state between operators to be kept in memory or written to local disk, which requires less I/O than writing to HDFS. 
+- Operators can start executing as soon as their input is ready; there is no need to wait for the entire preceding stage to finish before the next one starts. 
+
+#### Fault tolerance in dataflow engines
+
+Spark, Flink, and Tez avoid writing intermediate state to HDFS, so they take a different approach to tolerating faults: if a machine fails and the intermediate state on that machine is lost, it is recomputed from other data that is still available.
+
+the framework must keep track of how a given piece of data was computed — which input partitions it used, and which operators were applied to it. Spark uses the resilient distributed dataset (RDD) abstraction for tracking the ancestry of data.
+
+In order to avoid cascading downstream operators faults, it is better to make operators deterministic (use fixed seed when generating random numbers ,no reliance on system clocks and no external data source). Such causes of nondeterminism need to be removed in order to reliably recover from faults.
+
+When the job completes, its output needs to go somewhere durable so that users can find it and use it — most likely, it is written to the distributed filesystem again. Thus, when using a dataflow engine, materialized datasets on HDFS are still usually the inputs and the final outputs of a job. The improvement over MapReduce is that you save yourself writing all the intermediate state to the filesystem as well.
+
+#### Graphs and Iterative Processing
+
+One of the most famous graph analysis algorithms is PageRank, which tries to estimate the popularity of a web page based on what other web pages link to it. It is used as part of the formula that determines the order in which web search engines present their results.
+
+Graph algorithm is thus often implemented in an iterative style:
+- An external scheduler runs a batch process to calculate one step of the algorithm.
+- When the batch process completes, the scheduler checks whether the iterative algorithm has finished
+ If the algorithm has not yet finished, the scheduler goes back to step 1
+
+This approach works, but implementing it with MapReduce is often very inefficient, because MapReduce does not account for the iterative nature of the algorithm: it will always read the entire input dataset and produce a completely new output dataset, even if only a small part of the graph has changed compared to the last iteration.
+
+The bulk synchronous parallel (BSP) model of computation, also known as the Pregel model has become popular. The idea behind Pregel: one vertex can “send a message” to another vertex, and typically those messages are sent along the edges in a graph.
+
+The difference from MapReduce is that in the Pregel model, a vertex remembers its state in memory from one iteration to the next, so the function only needs to process new incoming messages.
+
+The fact that vertices can only communicate by message passing (not by querying each other directly) helps improve the performance of Pregel jobs. Even though the underlying network may drop, duplicate, or arbitrarily delay messages (see “Unreliable Networks”), Pregel implementations guarantee that messages are processed exactly once at their destination vertex in the following iteration.
+
+Fault tolerance is achieved by periodically checkpointing the state of all vertices at the end of an iteration — i.e., writing their full state to durable storage. If a node fails and its in-memory state is lost, the simplest solution is to roll back the entire graph computation to the last checkpoint and restart the computation.
+
+Graph algorithms often have a lot of cross-machine communication overhead, as vertices that communicate a lot may not be partitioned in the same machine and the intermediate state (messages sent between nodes) is often bigger than the original graph.
+
+For this reason, if your graph can fit in memory on a single computer, it’s quite likely that a single-machine (maybe even single-threaded) algorithm will outperform a distributed batch process. Efficiently parallelizing graph algorithms is an area of ongoing research
+
+#### High Level APIS and Languages
+
+As the problem of physically operating batch processes at very large scale has been considered more or less solved, attention has turned to other areas: improving the programming model, improving the efficiency of processing, and broadening the set of problems that these technologies can solve.
+
+Dataflow APIs (Spark, Flink) generally use relational-style building blocks to express a computation: joining datasets on the value of some field; grouping tuples by key; filtering by some condition; and aggregating tuples by counting, summing, or other functions.
+
+Besides the obvious advantage of requiring less code, these high-level interfaces also allow interactive use, in which you write analysis code incrementally in a shell and run it frequently to observe what it is doing.
+
+The benefit of specifying joins as relational operator (in dataflow APIs) instead of spelling out the code that performs the join in MapReduce, dataflow framework can analyze the properties of the join inputs and automatically decide which of the aforementioned join algorithms would be most suitable.
+
+Hive, Spark, and Flink have cost-based query optimizers that can do this, and even change the order of joins so that the amount of intermediate state is minimized.
+
+By incorporating declarative aspects in their high-level APIs, and having query optimizers that can take advantage of them during execution, batch processing frameworks begin to look more like MPP databases (and can achieve comparable performance). At the same time, by having the extensibility of being able to run arbitrary code and read/ write data in arbitrary formats, they retain their flexibility advantage. Specialization for different
+
+#### Chapter 11: Stream Processing 
