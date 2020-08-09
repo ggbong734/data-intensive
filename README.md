@@ -1215,11 +1215,130 @@ Derived data is redundant, in the sense that it duplicates existing information.
 
 #### Chapter 10 Batch Processing
 
+Three different types of systems:
+- **Services (online systems)**: A service waits for a request or instruction from a client to arrive. When one is received, the service tries to handle it as quickly as possible and sends a response back.
+- **Batch processing systems (offline systems)**: A batch processing system takes a large amount of input data, runs a job to process it, and produces some output data.
+- **Stream processing systems (near-real-time systems)**: Stream processing systems (near-real-time systems) Stream processing is somewhere between online and offline/ batch processing (so it is sometimes called near-real-time or nearline processing). Like a batch processing system, a stream processor consumes inputs and produces outputs (rather than responding to requests). However, a stream job operates on events shortly after they happen, whereas a batch job operates on a fixed set of input data.
 
-Kleppmann, Martin. Designing Data-Intensive Applications (p. 534). O'Reilly Media. Kindle Edition. 
+#### Batch Processing with Unix Tools
 
-Kleppmann, Martin. Designing Data-Intensive Applications (p. 534). O'Reilly Media. Kindle Edition. 
+Unix commands are powerful for batch processing. For example to fin the five most popular pages on your website:
+```
+cat /var/log/nginx/access.log |  # Read log file
+  awk '{print $7}' |             # Split each line into fields by whitespace, output only the seventh field from each line
+  sort             |             # sort the list of URLs alphabetically
+  uniq -c          |             # filters out repeated lines
+  sort -r -n       |             # sort by the number at the start of each line, number of times URL was requested
+  head -n 5        |             # outputs just the first five lines
+```
 
-Kleppmann, Martin. Designing Data-Intensive Applications (p. 534). O'Reilly Media. Kindle Edition. 
+The `sort` utility in GNU Coreutils (Linux) automatically handles larger-than-memory datasets by spilling to disk, and automatically parallelizes sorting across multiple CPU cores. This means that the simple chain of Unix commands we saw earlier easily scales to large datasets, without running out of memory. The bottleneck is likely to be the rate at which the input file can be read from disk.
 
-Kleppmann, Martin. Designing Data-Intensive Applications (p. 534). O'Reilly Media. Kindle Edition. 
+In Unix, the output of every program can be expected to become the input to another, as yet unknown, program. Not many pieces of software interoperate and compose as well as Unix tools do. Even databases with the same data model often don’t make it easy to get data out of one and into the other.
+
+Another characteristic feature of Unix tools is their use of standard input (stdin) and standard output (stdout). Pipes let you attach the stdout of one process to the stdin of another process. Separating the input/ output wiring from the program logic makes it easier to compose small tools into bigger systems.
+
+Some nice features of Unix tools:
+
+- The input files to Unix commands are normally treated as immutable. This means you can run the commands as often as you want, trying various command-line options, without damaging the input files.
+- You can end the pipeline at any point, pipe the output into less, and look at it to see if it has the expected form. This ability to inspect is great for debugging. 
+- You can write the output of one pipeline stage to a file and use that file as input to the next stage. This allows you to restart the later stage without rerunning the entire pipeline.
+
+However, there are limits to what you can do with stdin and stdout. Programs that need multiple inputs or outputs are possible but tricky. You can’t pipe a program’s output into a network connection. The biggest limitation of Unix tools is that they run only on a single machine.
+
+#### Map Reduce and Distributed Filesystems
+
+MapReduce is a bit like Unix tools, but distributed across potentially thousands of machines.
+
+A single MapReduce job is comparable to a single Unix process: it takes one or more inputs and produces one or more outputs.
+
+In Hadoop's implementation of MapReduce, jobs read and write files on Hadoop Distributed File System (HDFS). 
+
+HDFS is based on the shared-nothing principle architecture where nodes don't share memory, disks, or CPU. 
+
+HDFS consists of a daemon process running on each machine, exposing a network service that allows other nodes to access files stored on that machine.
+
+To create a MapReduce job, you need to implement two callback functions, the mapper and reducer, which behave as follows:
+- **Mapper**: The mapper is called once for every input record, and its job is to extract the key and value from the input record. For each input, it may generate any number of key-value pairs (including none).
+- **Reducer**: The MapReduce framework takes the key-value pairs produced by the mappers, collects all the values belonging to the same key, and calls the reducer with an iterator over that collection of values. The reducer can produce output records.
+
+In MapReduce, if you need a second sorting stage, you can implement it by writing a second MapReduce job and using the output of the first job as input to the second job. Viewed like this, the role of the mapper is to prepare the data by putting it into a form that is suitable for sorting, and the role of the reducer is to process the data that has been sorted.
+
+The main difference from pipelines of Unix commands is that MapReduce can parallelize a computation across many machines, without you having to write code to explicitly handle the parallelism.
+
+The MapReduce scheduler runs each mapper on one of the machines that stores a replica of the input file. In most cases, the application code that should run in the map task is not yet present on the machine that is assigned the task of running it, so the MapReduce framework first copies the code (JAR file for Java program) to the machines.
+
+It then starts the map task and begins reading the input file, passing one record at a time to the mapper callback. The output of the mapper consists of key-value pairs. 
+
+The reduce side of the computation is also partitioned. While the number of map tasks is determined by the number of input file blocks, the number of reduce tasks is configured by the job author (it can be different from the number of map tasks). To ensure that all key-value pairs with the same key end up at the same reducer, the framework uses a hash of the key to determine which reduce task should receive a particular key-value pair.
+
+The key-value pairs must be sorted, but the dataset is likely too large to be sorted with a conventional sorting algorithm on a single machine. Instead, the sorting is performed in stages.
+
+Whenever a mapper finishes reading its input file and writing its sorted output files, the MapReduce scheduler notifies the reducers that they can start fetching the output files from that mapper. The reducers connect to each of the mappers and download the files of sorted key-value pairs for their partition. The process of partitioning by reducer, sorting, and copying data partitions from mappers to reducers is known as the shuffle.
+
+The reduce task takes the files from the mappers and merges them together, preserving the sort order. If different mappers produced records with the same key, they will be adjacent in the merged reducer input.
+
+The reducer is called with a key and an iterator that sequentially scans over all records with the same key (which may in some cases not all fit in memory). The reducer can use arbitrary logic to process these records, and can generate any number of output records. These output records are written to a file on the distributed filesystem.
+
+#### MapReduce Workflows
+
+it is very common for MapReduce jobs to be chained together into workflows, such that the output of one job becomes the input to the next job.
+
+This chaining is done implicitly by directory name: the first job must be configured to write its output to a designated directory in HDFS, and the second job must be configured to use that same directory name for reading its input.
+
+Chained MapReduce jobs are therefore less like pipelines of Unix commands and more like a sequence of commands where each command’s output is written to a temporary file, and the next command reads from the temporary file. One job in a workflow can only start when the prior jobs — that is, the jobs that produce its input directories — have completed successfully.
+
+To handle these dependencies between job executions, various workflow schedulers for Hadoop have been developed, including Oozie, Azkaban, Luigi, Airflow, and Pinball.
+
+MapReduce has no concept of indexes — at least not in the usual sense. When a MapReduce job is given a set of files as input, it reads the entire content of all of those files; a database would call this operation a full table scan. If you only want to read a small number of records, a full table scan is outrageously expensive compared to an index lookup.
+
+
+#### Joining and Grouping in Reduce side 
+However, in analytic queries it is common to want to calculate aggregates over a large number of records. In this case, scanning the entire set of input files might be quite a reasonable thing to do, especially if it can be parallelized to multiple machines.
+
+
+In order to achieve good throughput in a batch process, the computation must be (as much as possible) local to one machine. Making random-access requests over the network for every record you want to process is too slow.
+
+One approach to joining tables will be to create a copy of the other table into the same HDFS, then MapReduce could be used to process the records in the same place efficiently.
+
+In sort-merge join, the mapper(s) output is sorted by key, and the reducers then merge together the sorted lists of records from both sides of the join. In a sort-merge join, the mappers and the sorting process make sure that all the necessary data to perform the join operation for a particular user ID is brought together in the same place: a single call to the reducer.
+
+Since MapReduce handles all network communication, it also shields the application code from having to worry about partial failures, such as the crash of another node: MapReduce transparently retries failed tasks without affecting the application logic.
+
+Besides joins, another common use of the “bringing related data to the same place” pattern is grouping records by some key (as in the GROUP BY clause in SQL). A simple way to group by is to set up the mappers so that the key-value pairs they produce use the desired grouping key. The partitioning and sorting process then brings together all the records with the same key in the same reducer.
+
+Another common use for grouping is collating all the activity events for a particular user session, in order to find out the sequence of actions that the user took — a process called sessionization.
+
+The pattern of “bringing all records with the same key to the same place” breaks down if there is a very large amount of data related to a single key (skew or hot spots). One approach is to scan the records for hot keys and spread the work of handling the hot key over several reducers, at the cost of having to replicate the other join input to multiple reducers.
+
+When grouping records by a hot key and aggregating them, you can perform the grouping in two stages. The first MapReduce stage sends records to a random reducer, so that each reducer performs the grouping on a subset of records for the hot key and outputs a more compact aggregated value per key. The second MapReduce job then combines the values from all of the first-stage reducers into a single value per key.
+
+#### Map side joins
+
+In reduce-side joins, The mappers take the role of preparing the input data: extracting the key and value from each input record, assigning the key-value pairs to a reducer partition, and sorting by key.
+
+However, the downside of reduce side join is that all that sorting, copying to reducers, and merging of reducer inputs can be quite expensive.
+
+If you can make certain assumptions about your input data, it is possible to make joins faster by using a so-called map-side join. This approach uses a cut-down MapReduce job in which there are no reducers and no sorting. Instead, each mapper simply reads one input file block from the distributed filesystem and writes one output file to the filesystem — that is all.
+
+- The simplest way of performing a map-side join applies in the case where a large dataset is joined with a small dataset. The small dataset needs to be small enough that it can be loaded entirely into memory in each of the mappers. THis is called **broadcast hash join**. So the small input is effectively “broadcast” to all partitions of the large input.
+- If the inputs to the map-side join are partitioned in the same way, then the hash join approach can be applied to each partition independently. This approach only works if both of the join’s inputs have the same number of partitions, with records assigned to partitions based on the same key and the same hash function.
+- Another variant of a map-side join applies if the input datasets are not only partitioned in the same way, but also sorted based on the same key. So called **map-side merge joins**. If a map-side merge join is possible, it probably means that prior MapReduce jobs brought the input datasets into this partitioned and sorted form in the first place.
+
+It is important to know the number of partitions and the keys by which the data is partitioned and sorted.
+
+#### Batch workflow outputs
+
+The output of a batch process is often not a report, but some other kind of structure.
+
+A batch process is a very effective way of building the indexes for full-text search system: the mappers partition the set of documents as needed, each reducer builds the index for its partition, and the index files are written to the distributed filesystem.
+
+
+Search indexes are just one example of the possible outputs of a batch processing workflow. Another common use for batch processing is to build machine learning systems such as classifiers and recommendation systems. The output of these batch jobs is some kind of database that can be queried. 
+
+One way is to build a brand-new database inside the batch job and write it as files to the job’s output directory in the distributed filesystem, just like the search indexes described above. Since Most of these key-value stores (database) are read-only (the files can only be written once by a batch job and are then immutable), the data structures are quite simple.
+
+By treating inputs as immutable and avoiding side effects (such as writing to external databases), batch jobs not only achieve good performance but also become much easier to maintain.
+
+the design principles that worked well for Unix also seem to be working well for Hadoop — but Unix and Hadoop also differ in some ways. On Hadoop, some of those low-value syntactic conversions are eliminated by using more structured file formats: Avro are often used, as they provide efficient schema-based encoding and allow evolution of their schemas over time.
+
